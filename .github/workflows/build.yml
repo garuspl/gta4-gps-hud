@@ -17,7 +17,7 @@ jobs:
   build:
     runs-on: windows-latest
     env:
-      NEXUSMODS_API_KEY: ${{ secrets.NEXUSMODS_API_KEY }}
+      HAS_NEXUS_KEY: ${{ secrets.NEXUS_API_KEY != '' }}
     steps:
       - uses: actions/checkout@v5
 
@@ -58,12 +58,12 @@ jobs:
         run: gh release create $env:GITHUB_REF_NAME $env:PKG --title "GPS HUD $env:GITHUB_REF_NAME" --generate-notes
 
       # Adds the release as a new version of the existing file on the Nexus Mods page. Needs the
-      # NEXUSMODS_API_KEY secret and the NEXUSMODS_FILE_ID variable; skipped until both are set.
+      # NEXUS_API_KEY secret and the NEXUSMODS_FILE_ID variable; skipped until both are set.
       - name: Upload to Nexus Mods
-        if: github.ref_type == 'tag' && env.NEXUSMODS_API_KEY != '' && vars.NEXUSMODS_FILE_ID != ''
+        if: github.ref_type == 'tag' && env.HAS_NEXUS_KEY == 'true' && vars.NEXUSMODS_FILE_ID != ''
         uses: Nexus-Mods/upload-action@98532f7670c27cbecc78fae03fa3e278147827e2 # v1.0.0-beta.11
         with:
-          api_key: ${{ secrets.NEXUSMODS_API_KEY }}
+          api_key: ${{ secrets.NEXUS_API_KEY }}
           file_id: ${{ vars.NEXUSMODS_FILE_ID }}
           filename: ${{ env.PKG }}
           version: ${{ env.VERSION }}
