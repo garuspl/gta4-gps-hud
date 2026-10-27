@@ -1,0 +1,6 @@
+bin/
+obj/
+dist/
+# ScriptHookDotNet binaries: extract the release zip here for local builds (CI downloads it)
+shdn/
+*.bak
