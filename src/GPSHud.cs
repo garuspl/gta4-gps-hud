@@ -1,6 +1,6 @@
 // GPS HUD for GTA IV (ScriptHookDotNet script)
-// Places the game's route arrow props on the road ahead of the player's vehicle, following the road network
-// towards the map waypoint (or a mission blip).
+// Places the game's route arrow props on the road ahead of the player's vehicle, following the route the
+// game's own GPS has plotted (read from game memory, see GameGps.cs).
 //
 // Written for C# 5 so it builds with the csc.exe that ships with .NET Framework 4.x.
 
@@ -27,7 +27,6 @@ namespace GPSHud
         public bool WrongWay;      // the route continues behind the car
         public int Id;
         public Vector3 Dest;
-        public string DestKind;
         public string[] Debug;
     }
 
@@ -41,13 +40,6 @@ namespace GPSHud
         public Vector3 CarPos;
     }
 
-    internal struct Cand
-    {
-        public Vector3 Pos, Dir, Axis;
-        public float Dist, Angle, AxisAlign;
-        public float DirAlign;   // node's traffic direction vs. the step direction (+1 = with traffic)
-    }
-
     public class GPSHudScript : Script
     {
         // ------------------------------------------------------------------ settings
@@ -57,36 +49,15 @@ namespace GPSHud
         bool showDebug;
         bool hideWhenHudOff = true;
 
-        bool useWaypoint = true;
-        bool useMissionBlips = true;
-        HashSet<int> missionIcons = new HashSet<int>();
-        HashSet<int> missionColours = new HashSet<int>();
         float arriveDistance = 20f;
 
         int refreshMs = 200;
-        float stepLength = 10f;
-        float maxRouteLength = 150f;
-        int maxTravelCallsPerBuild = 3;
-        int travelBudget;
-        bool lastWrongWay;
-
-        // Sign of the game's node headings relative to traffic, learned from AI cars (they always drive
-        // with traffic). +1 until there is clear evidence the other way.
-        float headingSign = 1f;
-        int headingEvidence;
-        int lastHeadingSample = -100000;
-        bool detectWrongWay = true;
-        bool useGameGps = true;
-        int wrongWayVotes;
-        string wrongWayDebug = "";
         float rebuildDistance = 5f;
         Vector3 lastBuildPos;
         int glowMaxLights = 3;
         string perfText = "";
         double perfRouteMs, perfFrameMs, perfObjMs;
         readonly System.Diagnostics.Stopwatch perfWatch = new System.Diagnostics.Stopwatch();
-        int maxCandidates = 8;
-        bool useTravelDistance = true;
 
         bool followLane = false;
         float maxLaneOffset = 7f;
@@ -119,15 +90,7 @@ namespace GPSHud
         volatile FrameState frame;
         int lastRouteBuild = -100000;
         int routeIdCounter;
-        int lastDestCheck = -100000;
-        bool hasDest;
-        Vector3 dest, destNode;
-        string destKind = "-";
-        int travelCalls;
         int lastErrorMs = -100000;
-        readonly List<string> blipDebug = new List<string>();
-        readonly Dictionary<long, float> travelCache = new Dictionary<long, float>();
-        readonly List<Cand> cands = new List<Cand>();
 
         // per-frame state (Tick only)
         float laneOffset, speedExtra;
@@ -147,7 +110,6 @@ namespace GPSHud
 
         public GPSHudScript()
         {
-            missionIcons.Add(0);
             LoadSettings();
             Interval = 0; // every frame, so the 3D arrows stay glued to the road
             Tick += OnTick;
@@ -169,22 +131,10 @@ namespace GPSHud
             showDebug = s.GetValueBool("ShowDebug", "General", showDebug);
             hideWhenHudOff = s.GetValueBool("HideWhenHudOff", "General", hideWhenHudOff);
 
-            useWaypoint = s.GetValueBool("UseWaypoint", "Destination", useWaypoint);
-            useMissionBlips = s.GetValueBool("UseMissionBlips", "Destination", useMissionBlips);
-            ParseIntList(s.GetValueString("MissionBlipIcons", "Destination", "0"), missionIcons);
-            ParseIntList(s.GetValueString("MissionBlipColours", "Destination", ""), missionColours);
             arriveDistance = s.GetValueFloat("ArriveDistance", "Destination", arriveDistance);
 
             refreshMs = Math.Max(50, s.GetValueInteger("RefreshIntervalMs", "Route", refreshMs));
-            stepLength = Clamp(s.GetValueFloat("StepLength", "Route", stepLength), 4f, 30f);
-            maxRouteLength = Clamp(s.GetValueFloat("MaxLength", "Route", maxRouteLength), 30f, 600f);
-            maxCandidates = Math.Max(3, Math.Min(16, s.GetValueInteger("NodeCandidates", "Route", maxCandidates)));
-            useTravelDistance = s.GetValueBool("UseTravelDistance", "Route", useTravelDistance);
-            maxTravelCallsPerBuild = Math.Max(1, s.GetValueInteger("PathfinderCallsPerBuild", "Route", maxTravelCallsPerBuild));
             rebuildDistance = Math.Max(0f, s.GetValueFloat("RebuildDistance", "Route", rebuildDistance));
-            detectWrongWay = s.GetValueBool("DetectWrongWay", "Route", detectWrongWay);
-            string source = s.GetValueString("Source", "Route", "GameGPS");
-            useGameGps = source == null || !source.Trim().Equals("Tracer", StringComparison.OrdinalIgnoreCase);
 
             followLane = s.GetValueBool("FollowLane", "Arrows", followLane);
             maxLaneOffset = s.GetValueFloat("MaxLaneOffset", "Arrows", maxLaneOffset);
@@ -252,7 +202,7 @@ namespace GPSHud
                     lastRouteBuild = now;
                     if (prev != null)
                         lastBuildPos = prev.CarPos;
-                    route = UpdateRoute(now);
+                    route = UpdateRoute();
                     perfRouteMs = Smooth(perfRouteMs, perfWatch.Elapsed.TotalMilliseconds);
                 }
                 perfWatch.Reset();
@@ -282,8 +232,8 @@ namespace GPSHud
 
             if (showDebug)
                 perfText = string.Format(CultureInfo.InvariantCulture,
-                    "perf: route build {0:0.00} ms (when rebuilt)  frame {1:0.00} ms  objects {2:0.00} ms  native calls {3}  node cache {4}",
-                    perfRouteMs, perfFrameMs, perfObjMs, nativeCalls, nodeCache.Count);
+                    "perf: route build {0:0.00} ms (when rebuilt)  frame {1:0.00} ms  objects {2:0.00} ms",
+                    perfRouteMs, perfFrameMs, perfObjMs);
         }
 
         static double Smooth(double avg, double sample)
@@ -305,8 +255,6 @@ namespace GPSHud
             if (prev.CarPos.DistanceTo2D(lastBuildPos) >= rebuildDistance)
                 return true;
             float needed = MaxAhead(objMaxDistance, prev) + 30f;
-            if (!useGameGps || !GameGps.Available)
-                needed = Math.Min(needed, maxRouteLength * 0.6f); // the tracer never reaches further anyway
             return !route.EndsAtDestination && route.Length - prev.S0 < needed;
         }
 
@@ -365,74 +313,16 @@ namespace GPSHud
             return veh != null;
         }
 
-        RouteSnapshot UpdateRoute(int now)
+        RouteSnapshot UpdateRoute()
         {
             Vehicle veh;
             if (!ShouldShow(out veh))
                 return null;
+            if (!GameGps.Available)
+                return DebugOnly(GameGps.Status);
 
-            Vector3 carPos = veh.Position;
-            Vector3 carFwd = veh.Direction;
-
-            // Preferred: follow exactly the route the game's GPS has plotted (the minimap line).
-            if (useGameGps && GameGps.Available)
-                return RouteFromGameGps(carPos, carFwd);
-
-            if (now - lastHeadingSample > 2000)
-            {
-                lastHeadingSample = now;
-                SampleTrafficHeadings(carPos);
-            }
-
-            if (now - lastDestCheck > 1000)
-            {
-                lastDestCheck = now;
-                Vector3 d; string kind;
-                if (FindDestination(carPos, out d, out kind))
-                {
-                    if (!hasDest || d.DistanceTo(dest) > 5f)
-                    {
-                        dest = d;
-                        destNode = SnapDestination(d);
-                        travelCache.Clear();
-                        lastWrongWay = false;
-                        wrongWayVotes = 0;
-                    }
-                    hasDest = true;
-                    destKind = kind;
-                }
-                else
-                {
-                    hasDest = false;
-                    destKind = "-";
-                }
-            }
-
-            if (!hasDest)
-                return DebugOnly("no destination");
-            if (carPos.DistanceTo2D(destNode) < arriveDistance)
-                return DebugOnly("arrived");
-
-            RouteSnapshot r = BuildRoute(carPos, carFwd, destNode);
-            if (r == null)
-                return DebugOnly("no road found");
-
-            if (showDebug)
-            {
-                List<string> l = new List<string>();
-                l.Add(string.Format(CultureInfo.InvariantCulture,
-                    "GPS HUD  dest:{0}  dist:{1:0}m  route:{2:0}m/{3}pts{4}",
-                    destKind, carPos.DistanceTo2D(destNode), r.Length, r.Pts.Length,
-                    (r.EndsAtDestination ? " (ends at dest)" : "") + (r.WrongWay ? "  WRONG WAY (route continues behind)" : "")));
-                l.Add(string.Format(CultureInfo.InvariantCulture,
-                    "travel-distance calls:{0} cache:{1} enabled:{2}", travelCalls, travelCache.Count, useTravelDistance));
-                l.Add(wrongWayDebug);
-                l.Add(string.Format(CultureInfo.InvariantCulture,
-                    "node heading vs traffic: evidence {0:+0;-0;0} -> sign {1:+0;-0}", headingEvidence, headingSign));
-                l.AddRange(blipDebug);
-                r.Debug = l.ToArray();
-            }
-            return r;
+            // follow exactly the route the game's GPS has plotted (the minimap line)
+            return RouteFromGameGps(veh.Position, veh.Direction);
         }
 
         RouteSnapshot RouteFromGameGps(Vector3 carPos, Vector3 carFwd)
@@ -482,7 +372,6 @@ namespace GPSHud
             r.EndsAtDestination = g.Length < GameGps.MaxPoints; // a full buffer means the route was cut short
             r.Id = ++routeIdCounter;
             r.Dest = end;
-            r.DestKind = "game GPS";
 
             // the GPS route starting behind the car means it wants you to turn around
             float s0, lat, off;
@@ -511,528 +400,8 @@ namespace GPSHud
             if (!showDebug)
                 return null;
             RouteSnapshot r = new RouteSnapshot();
-            List<string> l = new List<string>();
-            l.Add("GPS HUD: " + reason + "   dest: " + destKind);
-            l.AddRange(blipDebug);
-            r.Debug = l.ToArray();
+            r.Debug = new string[] { "GPS HUD: " + reason };
             return r;
-        }
-
-        // =================================================================================== destination
-
-        static readonly BlipType[] BlipTypes =
-        {
-            BlipType.Coordinate, BlipType.Vehicle, BlipType.Ped, BlipType.Object, BlipType.Pickup, BlipType.Contact
-        };
-
-        bool FindDestination(Vector3 from, out Vector3 result, out string kind)
-        {
-            result = Vector3.Zero;
-            kind = null;
-            if (showDebug)
-                blipDebug.Clear();
-
-            if (useWaypoint)
-            {
-                Blip wp = Game.GetWaypoint();
-                if (wp != null && Game.Exists(wp))
-                {
-                    result = wp.Position;
-                    kind = "waypoint";
-                    return true;
-                }
-            }
-
-            if (!useMissionBlips && !showDebug)
-                return false;
-
-            bool found = false;
-            float best = float.MaxValue;
-            for (int t = 0; t < BlipTypes.Length; t++)
-            {
-                Blip[] blips = Blip.GetAllBlipsOfType(BlipTypes[t]);
-                if (blips == null)
-                    continue;
-                for (int i = 0; i < blips.Length; i++)
-                {
-                    Blip b = blips[i];
-                    if (b == null || !Game.Exists(b))
-                        continue;
-
-                    int icon = (int)b.Icon;
-                    if (useWaypoint && b.Icon == BlipIcon.Misc_Waypoint)
-                    {
-                        result = b.Position;
-                        kind = "waypoint";
-                        return true;
-                    }
-
-                    Vector3 pos = b.Position;
-                    int colour = (int)b.Color;
-                    bool shortRange = b.ShowOnlyWhenNear;
-                    float d = from.DistanceTo2D(pos);
-
-                    if (showDebug && d < 3000f && blipDebug.Count < 12)
-                        blipDebug.Add(string.Format(CultureInfo.InvariantCulture,
-                            "  blip type:{0} icon:{1}({2}) colour:{3}({4}) short:{5} dist:{6:0}m",
-                            BlipTypes[t], icon, b.Icon, colour, b.Color, shortRange, d));
-
-                    if (useMissionBlips && !shortRange && d > 10f && d < best
-                        && missionIcons.Contains(icon)
-                        && (missionColours.Count == 0 || missionColours.Contains(colour)))
-                    {
-                        found = true;
-                        best = d;
-                        result = pos;
-                        kind = "mission blip (" + BlipTypes[t] + ")";
-                    }
-                }
-            }
-            return found;
-        }
-
-        // Map waypoints have no height and may be off-road; route to the closest road node instead.
-        static Vector3 SnapDestination(Vector3 d)
-        {
-            Vector3 probe = d;
-            if (probe.Z == 0f)
-                probe.Z = 30f;
-            Vector3 node;
-            if (ClosestNode(probe, out node) && node.DistanceTo2D(d) < 150f)
-                return node;
-            return d;
-        }
-
-        // =================================================================================== natives
-
-        struct NodeHit
-        {
-            public bool Ok;
-            public Vector3 Pos;
-            public float Heading;
-        }
-
-        // Road nodes never move, and the route is re-traced over the same road again and again, so node
-        // lookups are cached by (probe position rounded to 1 m, n). This removes most native calls.
-        readonly Dictionary<long, NodeHit> nodeCache = new Dictionary<long, NodeHit>();
-        readonly Dictionary<long, float> groundCache = new Dictionary<long, float>();
-        int nativeCalls;
-
-        static long GridKey(Vector3 p, float cell)
-        {
-            long x = (long)Math.Round(p.X / cell) + 0x80000;
-            long y = (long)Math.Round(p.Y / cell) + 0x80000;
-            long z = (long)Math.Round(p.Z / 4f) + 0x80;
-            return (x & 0xFFFFF) << 28 | (y & 0xFFFFF) << 8 | (z & 0xFF);
-        }
-
-        bool NthNode(Vector3 p, int n, out Vector3 node, out float heading)
-        {
-            long key = GridKey(p, 1f) * 32 + n;
-            NodeHit hit;
-            if (!nodeCache.TryGetValue(key, out hit))
-            {
-                Pointer x = typeof(float), y = typeof(float), z = typeof(float), h = typeof(float);
-                bool ok = Function.Call<bool>("GET_NTH_CLOSEST_CAR_NODE_WITH_HEADING", p.X, p.Y, p.Z, n, x, y, z, h);
-                nativeCalls++;
-                hit.Pos = new Vector3((float)x, (float)y, (float)z);
-                hit.Heading = (float)h;
-                hit.Ok = ok && (hit.Pos.X != 0f || hit.Pos.Y != 0f);
-                if (nodeCache.Count > 50000)
-                    nodeCache.Clear();
-                nodeCache[key] = hit;
-            }
-            node = hit.Pos;
-            heading = hit.Heading;
-            return hit.Ok;
-        }
-
-        static bool ClosestNode(Vector3 p, out Vector3 node)
-        {
-            Pointer x = typeof(float), y = typeof(float), z = typeof(float);
-            bool ok = Function.Call<bool>("GET_CLOSEST_CAR_NODE", p.X, p.Y, p.Z, x, y, z);
-            node = new Vector3((float)x, (float)y, (float)z);
-            return ok && (node.X != 0f || node.Y != 0f);
-        }
-
-        float GroundZ(Vector3 p)
-        {
-            long key = GridKey(p, 0.5f);
-            float gz;
-            if (!groundCache.TryGetValue(key, out gz))
-            {
-                gz = World.GetGroundZ(new Vector3(p.X, p.Y, p.Z + 1.5f), GroundType.NextBelowCurrent);
-                nativeCalls++;
-                // collision that isn't streamed in yet reads as 0; don't cache that
-                if (gz != 0f)
-                {
-                    if (groundCache.Count > 20000)
-                        groundCache.Clear();
-                    groundCache[key] = gz;
-                }
-            }
-            if (gz == 0f || Math.Abs(gz - p.Z) > 3f)
-                return p.Z;
-            return gz;
-        }
-
-        // Returns the road-network distance, -1 if unknown, or NaN if this route build has used up its
-        // budget of pathfinder calls (each one is a full A* search inside the game, so they're spread out).
-        float TravelDistance(Vector3 from, Vector3 to)
-        {
-            long key = ((long)(uint)((int)Math.Round(from.X) + 100000) << 20) | (uint)((int)Math.Round(from.Y) + 100000);
-            float cached;
-            if (travelCache.TryGetValue(key, out cached))
-                return cached;
-            if (useTravelDistance && travelBudget <= 0)
-                return float.NaN;
-            travelBudget--;
-
-            float r = -1f;
-            if (useTravelDistance)
-            {
-                try
-                {
-                    r = Function.Call<float>("CALCULATE_TRAVEL_DISTANCE_BETWEEN_NODES", from.X, from.Y, from.Z, to.X, to.Y, to.Z);
-                    travelCalls++;
-                }
-                catch (Exception ex)
-                {
-                    useTravelDistance = false;
-                    LogError(ex);
-                }
-            }
-            if (float.IsNaN(r) || float.IsInfinity(r) || r <= 0f || r > 100000f)
-                r = -1f;
-
-            if (travelCache.Count > 2048)
-                travelCache.Clear();
-            travelCache[key] = r;
-            return r;
-        }
-
-        // =================================================================================== route building
-
-        RouteSnapshot BuildRoute(Vector3 carPos, Vector3 carFwd, Vector3 target)
-        {
-            travelBudget = maxTravelCallsPerBuild;
-            Vector3 dir = Flat(carFwd);
-            if (dir.Length() < 0.1f)
-                return null;
-            dir = Vector3.Normalize(dir);
-
-            Vector3 start; float startHeading;
-            if (!FindStartNode(carPos, dir, out start, out startHeading))
-                return null;
-
-            Vector3 hd = HeadingDir(startHeading);
-            if (Vector3.Dot(hd, dir) < 0f) hd = -hd;
-            dir = SafeNormalize(dir * 0.6f + hd * 0.4f);
-
-            // The tracer only ever moves forward, so first check whether the route actually continues
-            // behind the car (the game's GPS would say "turn around"). Compare the road distance to the
-            // destination from the next node ahead and the next node behind; done first so these
-            // pathfinder calls always fit in the budget (they're cached per node anyway).
-            bool wrongWay = DetectWrongWay(start, dir, target);
-            if (wrongWay)
-                dir = -dir;
-
-            List<Vector3> nodes = new List<Vector3>();
-            nodes.Add(start);
-            Vector3 cur = start;
-            float total = 0f;
-            bool reached = false;
-            int maxSteps = (int)(maxRouteLength / stepLength) + 10;
-
-            for (int i = 0; i < maxSteps; i++)
-            {
-                if (cur.DistanceTo2D(target) < stepLength * 1.3f)
-                {
-                    nodes.Add(target);
-                    reached = true;
-                    break;
-                }
-
-                Vector3 next, nextDir;
-                if (!StepAlongRoad(cur, dir, target, out next, out nextDir))
-                    break;
-                if (IsNearRecent(nodes, next, 1.5f))
-                    break;
-
-                total += cur.DistanceTo2D(next);
-                nodes.Add(next);
-                cur = next;
-                dir = nextDir;
-                if (total >= maxRouteLength)
-                    break;
-            }
-
-            if (nodes.Count < 2)
-                return null;
-
-            for (int i = 0; i < nodes.Count; i++)
-            {
-                Vector3 n = nodes[i];
-                n.Z = GroundZ(n);
-                nodes[i] = n;
-            }
-
-            List<Vector3> pts = Chaikin(Chaikin(nodes));
-            RouteSnapshot r = new RouteSnapshot();
-            r.Pts = pts.ToArray();
-            r.Cum = new float[r.Pts.Length];
-            for (int i = 1; i < r.Pts.Length; i++)
-                r.Cum[i] = r.Cum[i - 1] + r.Pts[i - 1].DistanceTo2D(r.Pts[i]);
-            r.Length = r.Cum[r.Cum.Length - 1];
-            r.EndsAtDestination = reached;
-            r.WrongWay = wrongWay;
-            r.Id = ++routeIdCounter;
-            r.Dest = target;
-            r.DestKind = destKind;
-            return r;
-        }
-
-        // Compares nearby AI cars' driving direction with the heading of the road node under them.
-        void SampleTrafficHeadings(Vector3 carPos)
-        {
-            Vehicle[] cars = World.GetVehicles(carPos, 80f);
-            if (cars == null)
-                return;
-            int used = 0;
-            for (int i = 0; i < cars.Length && used < 8; i++)
-            {
-                Vehicle v = cars[i];
-                if (v == null || !Game.Exists(v) || v.Position.DistanceTo(carPos) < 4f || v.Speed < 3f)
-                    continue;
-                Vector3 node; float h;
-                if (!NthNode(v.Position, 1, out node, out h) || node.DistanceTo2D(v.Position) > 6f)
-                    continue;
-                Vector3 vd = Flat(v.Direction);
-                if (vd.Length() < 0.1f)
-                    continue;
-                float dot = Vector3.Dot(HeadingDir(h), Vector3.Normalize(vd));
-                if (Math.Abs(dot) < 0.85f)
-                    continue;
-                headingEvidence = Math.Max(-60, Math.Min(60, headingEvidence + (dot > 0f ? 1 : -1)));
-                used++;
-            }
-            headingSign = headingEvidence <= -5 ? -1f : 1f;
-        }
-
-        bool DetectWrongWay(Vector3 start, Vector3 dir, Vector3 target)
-        {
-            wrongWayDebug = "wrong-way check: off";
-            if (!detectWrongWay || !useTravelDistance)
-                return lastWrongWay = false;
-            if (start.DistanceTo2D(target) < stepLength * 3f)
-                return lastWrongWay = false;
-
-            Vector3 ahead, behind;
-            if (!NeighbourAlong(start, dir, dir, out ahead) || !NeighbourAlong(start, -dir, dir, out behind))
-            {
-                wrongWayDebug = "wrong-way check: no road both ways";
-                return lastWrongWay; // e.g. dead end: keep the previous answer
-            }
-
-            // these two calls don't count against the junction budget
-            int savedBudget = travelBudget;
-            travelBudget = int.MaxValue;
-            float ta = TravelDistance(ahead, target);
-            float tb = TravelDistance(behind, target);
-            travelBudget = savedBudget;
-
-            float gap = ahead.DistanceTo2D(behind);
-            float la = ahead.DistanceTo2D(target), lb = behind.DistanceTo2D(target);
-            wrongWayDebug = string.Format(CultureInfo.InvariantCulture,
-                "wrong-way check: ahead {0:0}m (crow {1:0})  behind {2:0}m (crow {3:0})  gap {4:0}m  votes {5}",
-                ta, la, tb, lb, gap, wrongWayVotes);
-
-            // A road distance can never be shorter than the straight-line distance; if it is, these numbers
-            // aren't real road distances and can't be trusted for this decision.
-            if (ta < 0f || tb < 0f || ta < la * 0.95f || tb < lb * 0.95f)
-            {
-                wrongWayVotes = 0;
-                return lastWrongWay = false;
-            }
-
-            // Driving the wrong way, the shortest route from the node ahead runs back through the node behind,
-            // so it is longer by about the road distance between them. Require most of that difference.
-            bool vote = ta - tb > gap * 0.75f;
-
-            // must agree on several rebuilds in a row before flipping either way
-            if (vote) wrongWayVotes = Math.Min(wrongWayVotes + 1, 3);
-            else wrongWayVotes = Math.Max(wrongWayVotes - 1, 0);
-            if (!lastWrongWay && wrongWayVotes >= 3) lastWrongWay = true;
-            else if (lastWrongWay && wrongWayVotes <= 1) lastWrongWay = false;
-            return lastWrongWay;
-        }
-
-        bool NeighbourAlong(Vector3 from, Vector3 dir, Vector3 travelDir, out Vector3 node)
-        {
-            node = from;
-            GatherCandidates(from, dir, stepLength, stepLength * 0.35f, stepLength * 2.2f);
-            if (cands.Count == 0)
-                return false;
-            // stay on the carriageway whose traffic runs along travelDir
-            Cand best = cands[0];
-            float bestScore = float.MaxValue;
-            for (int i = 0; i < cands.Count; i++)
-            {
-                float with = Vector3.Dot(cands[i].Axis, travelDir) * headingSign;
-                float score = Math.Abs(cands[i].Angle) + (with < -0.5f ? 1.5f : 0f);
-                if (score < bestScore) { bestScore = score; best = cands[i]; }
-            }
-            node = best.Pos;
-            return true;
-        }
-
-        bool FindStartNode(Vector3 carPos, Vector3 dir, out Vector3 best, out float bestHeading)
-        {
-            best = Vector3.Zero;
-            bestHeading = 0f;
-            float bestScore = float.MaxValue;
-            for (int n = 1; n <= 7; n++)
-            {
-                Vector3 p; float h;
-                if (!NthNode(carPos, n, out p, out h))
-                    continue;
-                float d = p.DistanceTo2D(carPos);
-                if (d > 30f || Math.Abs(p.Z - carPos.Z) > 6f)
-                    continue;
-                float signed = Vector3.Dot(HeadingDir(h), dir) * headingSign;
-                float score = d + (1f - Math.Abs(signed)) * 25f + (signed < -0.5f ? 15f : 0f);
-                if (score < bestScore)
-                {
-                    bestScore = score;
-                    best = p;
-                    bestHeading = h;
-                }
-            }
-            return bestScore < float.MaxValue;
-        }
-
-        bool StepAlongRoad(Vector3 cur, Vector3 dir, Vector3 target, out Vector3 next, out Vector3 nextDir)
-        {
-            next = cur;
-            nextDir = dir;
-
-            GatherCandidates(cur, dir, stepLength, stepLength * 0.35f, stepLength * 2.2f);
-            if (cands.Count == 0)
-                GatherCandidates(cur, dir, stepLength * 2f, stepLength * 0.5f, stepLength * 3.5f);
-            if (cands.Count == 0)
-                return false;
-
-            cands.Sort(delegate (Cand a, Cand b) { return a.Angle.CompareTo(b.Angle); });
-
-            // group candidates that lead in roughly the same direction
-            List<List<Cand>> clusters = new List<List<Cand>>();
-            for (int i = 0; i < cands.Count; i++)
-            {
-                if (clusters.Count == 0 || cands[i].Angle - cands[i - 1].Angle > 25f * Deg2Rad)
-                    clusters.Add(new List<Cand>());
-                clusters[clusters.Count - 1].Add(cands[i]);
-            }
-
-            Cand chosen;
-            if (clusters.Count == 1)
-            {
-                chosen = BestAligned(clusters[0]);
-            }
-            else
-            {
-                // junction: pick the branch with the shortest road distance to the destination
-                Cand[] reps = new Cand[clusters.Count];
-                float[] travel = new float[clusters.Count];
-                bool allValid = true;
-                for (int i = 0; i < clusters.Count; i++)
-                {
-                    reps[i] = BestAligned(clusters[i]);
-                    travel[i] = TravelDistance(reps[i].Pos, target);
-                    if (float.IsNaN(travel[i]))
-                        return false; // out of pathfinder budget: end the route here, extend it next build
-                    // a road distance shorter than the straight line isn't a real road distance
-                    if (travel[i] < 0f || travel[i] < reps[i].Pos.DistanceTo2D(target) * 0.95f) allValid = false;
-                }
-
-                int bestIdx = 0;
-                float bestCost = float.MaxValue;
-                for (int i = 0; i < reps.Length; i++)
-                {
-                    float cost = allValid ? reps[i].Dist + travel[i] : reps[i].Pos.DistanceTo2D(target);
-                    cost += Math.Abs(reps[i].Angle) * 3f;
-                    if (reps[i].DirAlign < -0.5f && reps[i].AxisAlign > 0.7f)
-                        cost += 60f; // would mean driving against traffic
-                    if (cost < bestCost) { bestCost = cost; bestIdx = i; }
-                }
-                chosen = reps[bestIdx];
-            }
-
-            next = chosen.Pos;
-            Vector3 ax = chosen.Axis;
-            if (Vector3.Dot(ax, chosen.Dir) < 0f) ax = -ax;
-            nextDir = chosen.AxisAlign > 0.6f ? SafeNormalize(chosen.Dir * 0.5f + ax * 0.5f) : chosen.Dir;
-            return true;
-        }
-
-        void GatherCandidates(Vector3 cur, Vector3 dir, float probeDist, float minD, float maxD)
-        {
-            cands.Clear();
-            Vector3 probe = cur + dir * probeDist;
-            for (int n = 1; n <= maxCandidates; n++)
-            {
-                Vector3 p; float h;
-                if (!NthNode(probe, n, out p, out h))
-                    continue;
-                if (Math.Abs(p.Z - cur.Z) > 6f)
-                    continue;
-
-                Vector3 v = Flat(p - cur);
-                float d = v.Length();
-                if (d < minD || d > maxD)
-                    continue;
-                Vector3 vn = v / d;
-                if (Vector3.Dot(vn, dir) < 0.17f) // more than ~80 degrees off
-                    continue;
-
-                bool dup = false;
-                for (int i = 0; i < cands.Count; i++)
-                    if (cands[i].Pos.DistanceTo2D(p) < 1f) { dup = true; break; }
-                if (dup)
-                    continue;
-
-                Cand c = new Cand();
-                c.Pos = p;
-                c.Dir = vn;
-                c.Dist = d;
-                c.Angle = SignedAngle(dir, vn);
-                c.Axis = HeadingDir(h);
-                c.AxisAlign = Math.Abs(Vector3.Dot(c.Axis, vn));
-                c.DirAlign = Vector3.Dot(c.Axis, vn) * headingSign;
-                cands.Add(c);
-            }
-        }
-
-        Cand BestAligned(List<Cand> list)
-        {
-            Cand best = list[0];
-            float bestScore = float.MaxValue;
-            for (int i = 0; i < list.Count; i++)
-            {
-                Cand c = list[i];
-                float score = Math.Abs(c.Angle) + Math.Abs(c.Dist - stepLength) / stepLength * 0.4f
-                              + (1f - c.AxisAlign) * 0.3f
-                              + (c.DirAlign < -0.5f ? 1.5f : 0f); // node on the opposite carriageway
-                if (score < bestScore) { bestScore = score; best = c; }
-            }
-            return best;
-        }
-
-        static bool IsNearRecent(List<Vector3> nodes, Vector3 p, float radius)
-        {
-            for (int i = Math.Max(0, nodes.Count - 5); i < nodes.Count; i++)
-                if (nodes[i].DistanceTo2D(p) < radius)
-                    return true;
-            return false;
         }
 
         static List<Vector3> Chaikin(List<Vector3> pts)
@@ -1701,32 +1070,6 @@ namespace GPSHud
         {
             float l = v.Length();
             return l > 1e-5f ? v / l : Vector3.Zero;
-        }
-
-        // GTA IV heading: degrees, 0 = north (+Y), counter-clockwise
-        static Vector3 HeadingDir(float heading)
-        {
-            float h = heading * Deg2Rad;
-            return new Vector3((float)-Math.Sin(h), (float)Math.Cos(h), 0f);
-        }
-
-        // positive = counter-clockwise (left)
-        static float SignedAngle(Vector3 a, Vector3 b)
-        {
-            return (float)Math.Atan2(a.X * b.Y - a.Y * b.X, a.X * b.X + a.Y * b.Y);
-        }
-
-        static void ParseIntList(string s, HashSet<int> into)
-        {
-            if (s == null)
-                return;
-            into.Clear();
-            foreach (string part in s.Split(new char[] { ',', ' ', ';' }, StringSplitOptions.RemoveEmptyEntries))
-            {
-                int v;
-                if (int.TryParse(part, NumberStyles.Integer, CultureInfo.InvariantCulture, out v))
-                    into.Add(v);
-            }
         }
 
         // "A,R,G,B" or "R,G,B"
