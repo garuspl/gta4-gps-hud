@@ -442,11 +442,27 @@ namespace GPSHud
             if (!GameGps.TryRead(out g, out slot, out state))
                 return DebugOnly("game GPS has no route");
 
-            // the route runs from the player to the destination; make sure of the order
-            if (g[g.Length - 1].DistanceTo2D(carPos) < g[0].DistanceTo2D(carPos))
+            // The route runs from the player to the destination; make sure of the order. The destination
+            // tells the ends apart best: going by the car alone fails when the destination is on a road
+            // under a bridge the car is on, which is closer on the map than the start of the route.
+            int now = Environment.TickCount;
+            if (now - lastDestCheck > 1000)
+            {
+                lastDestCheck = now;
+                hasDest = FindDestination(carPos, out dest, out destKind);
+                if (!hasDest)
+                    destKind = "-";
+            }
+            float firstToDest = hasDest ? g[0].DistanceTo2D(dest) : float.MaxValue;
+            float lastToDest = hasDest ? g[g.Length - 1].DistanceTo2D(dest) : float.MaxValue;
+            // a blip the route doesn't lead to (not what the game's GPS is following) says nothing
+            bool reverse = Math.Min(firstToDest, lastToDest) < 60f
+                ? lastToDest > firstToDest
+                : LevelDistance(g[g.Length - 1], carPos) < LevelDistance(g[0], carPos);
+            if (reverse)
                 Array.Reverse(g);
             Vector3 end = g[g.Length - 1];
-            if (carPos.DistanceTo2D(end) < arriveDistance)
+            if (carPos.DistanceTo2D(end) < arriveDistance && Math.Abs(carPos.Z - end.Z) < 8f)
                 return DebugOnly("arrived");
 
             // GPS points sit only where the road bends (straights can be hundreds of metres long), so
@@ -1042,9 +1058,19 @@ namespace GPSHud
 
         // =================================================================================== route queries
 
+        // Map distance, plus any height difference beyond what the route's rough heights can be off by,
+        // so a road passing under a bridge doesn't count as the same place as the bridge.
+        static float LevelDistance(Vector3 a, Vector3 b)
+        {
+            return a.DistanceTo2D(b) + Math.Max(0f, Math.Abs(a.Z - b.Z) - 3f);
+        }
+
+        // dist is the map (2D) distance to the route; the closest part of the route is chosen with
+        // LevelDistance so a car on a bridge stays on the bridge's part of the route.
         static void ProjectOnRoute(RouteSnapshot r, Vector3 p, out float s, out float lateral, out float dist)
         {
             s = 0f; lateral = 0f; dist = float.MaxValue;
+            float best = float.MaxValue;
             Vector3 q = Flat(p);
             for (int i = 0; i < r.Pts.Length - 1; i++)
             {
@@ -1054,8 +1080,11 @@ namespace GPSHud
                 float t = len > 1e-3f ? Clamp(Vector3.Dot(q - a, ab) / (len * len), 0f, 1f) : 0f;
                 Vector3 proj = a + ab * t;
                 float d = (q - proj).Length();
-                if (d < dist)
+                float z = r.Pts[i].Z + (r.Pts[i + 1].Z - r.Pts[i].Z) * t;
+                float score = d + Math.Max(0f, Math.Abs(p.Z - z) - 3f);
+                if (score < best)
                 {
+                    best = score;
                     dist = d;
                     s = r.Cum[i] + len * t;
                     Vector3 tan = SafeNormalize(ab);
