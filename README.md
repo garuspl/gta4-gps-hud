@@ -32,7 +32,9 @@ powershell -File build.ps1
 powershell -File install.ps1 -GameDir "<path to GTAIV folder>"
 ```
 No SDK is needed; the build uses the C# compiler that ships with .NET Framework 4.x. Pushing a tag such
-as `v1.0.0` makes GitHub Actions build the mod and publish a release.
+as `v1.0.0` makes GitHub Actions build the mod and publish a release. It's also uploaded to Nexus Mods as
+a new version of the mod's file once the repository has a `NEXUSMODS_API_KEY` secret and a
+`NEXUSMODS_FILE_ID` variable.
 
 ## Troubleshooting
 

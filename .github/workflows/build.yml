@@ -16,6 +16,8 @@ env:
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      NEXUSMODS_API_KEY: ${{ secrets.NEXUSMODS_API_KEY }}
     steps:
       - uses: actions/checkout@v5
 
@@ -41,6 +43,7 @@ jobs:
           Copy-Item README.md dist/pkg
           Compress-Archive dist/pkg/* "dist/GPSHud-$name.zip"
           "PKG=dist/GPSHud-$name.zip" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "VERSION=$($name -replace '^v', '')" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
       - uses: actions/upload-artifact@v7
         with:
@@ -53,3 +56,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create $env:GITHUB_REF_NAME $env:PKG --title "GPS HUD $env:GITHUB_REF_NAME" --generate-notes
+
+      # Adds the release as a new version of the existing file on the Nexus Mods page. Needs the
+      # NEXUSMODS_API_KEY secret and the NEXUSMODS_FILE_ID variable; skipped until both are set.
+      - name: Upload to Nexus Mods
+        if: github.ref_type == 'tag' && env.NEXUSMODS_API_KEY != '' && vars.NEXUSMODS_FILE_ID != ''
+        uses: Nexus-Mods/upload-action@98532f7670c27cbecc78fae03fa3e278147827e2 # v1.0.0-beta.11
+        with:
+          api_key: ${{ secrets.NEXUSMODS_API_KEY }}
+          file_id: ${{ vars.NEXUSMODS_FILE_ID }}
+          filename: ${{ env.PKG }}
+          version: ${{ env.VERSION }}
+          display_name: GPS HUD ${{ github.ref_name }}
+          archive_existing_version: true
+          update_mod_version: true
