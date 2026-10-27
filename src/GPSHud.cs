@@ -442,25 +442,19 @@ namespace GPSHud
             if (!GameGps.TryRead(out g, out slot, out state))
                 return DebugOnly("game GPS has no route");
 
-            // The route runs from the player to the destination; make sure of the order. The destination
-            // tells the ends apart best: going by the car alone fails when the destination is on a road
-            // under a bridge the car is on, which is closer on the map than the start of the route.
-            int now = Environment.TickCount;
-            if (now - lastDestCheck > 1000)
+            // The game stores the route from where it was planned to the destination, and doesn't trim it
+            // as the car drives along, so the car can be anywhere on it: the end nearest the car is not
+            // the start (e.g. with the destination under a bridge the car is on). Only reverse when the car
+            // is right at the last point and pointing along the route read backwards.
+            int last = g.Length - 1;
+            float toFirst = LevelDistance(g[0], carPos), toLast = LevelDistance(g[last], carPos);
+            if (toLast < 50f && toLast < toFirst * 0.25f)
             {
-                lastDestCheck = now;
-                hasDest = FindDestination(carPos, out dest, out destKind);
-                if (!hasDest)
-                    destKind = "-";
+                Vector3 back = Flat(g[last - 1] - g[last]);
+                Vector3 cf0 = Flat(carFwd);
+                if (back.Length() > 0.1f && cf0.Length() > 0.1f && Vector3.Dot(back, cf0) > 0f)
+                    Array.Reverse(g);
             }
-            float firstToDest = hasDest ? g[0].DistanceTo2D(dest) : float.MaxValue;
-            float lastToDest = hasDest ? g[g.Length - 1].DistanceTo2D(dest) : float.MaxValue;
-            // a blip the route doesn't lead to (not what the game's GPS is following) says nothing
-            bool reverse = Math.Min(firstToDest, lastToDest) < 60f
-                ? lastToDest > firstToDest
-                : LevelDistance(g[g.Length - 1], carPos) < LevelDistance(g[0], carPos);
-            if (reverse)
-                Array.Reverse(g);
             Vector3 end = g[g.Length - 1];
             if (carPos.DistanceTo2D(end) < arriveDistance && Math.Abs(carPos.Z - end.Z) < 8f)
                 return DebugOnly("arrived");
@@ -1374,19 +1368,24 @@ namespace GPSHud
             return true;
         }
 
-        static readonly float[] SurfaceProbeHeights = { 1.5f, 4f, 8f, 15f, 30f };
+        // A probe only finds the first surface below (or above) where it starts, so a road just above p.Z,
+        // or under bridge structure, is missed by a single probe; closely spaced probes both ways find it.
+        static readonly float[] ProbesDown = { 0.5f, 1.5f, 3f, 5f, 8f, 15f, 30f };
+        static readonly float[] ProbesUp = { 1f, 3f };
 
-        // Finds the ground surface closest to p.Z. Probing down from several heights finds the road even
-        // when p.Z is below it, while picking the closest hit keeps arrows off bridges and overpasses
-        // above the road (and off the ground under a bridge the road runs over).
+        // Finds the ground surface closest to p.Z, so arrows stay on the road the car is on and not on a
+        // bridge or overpass above it or on the ground or a lower deck under it.
         static bool FindRoadSurface(Vector3 p, out float z)
         {
             z = p.Z;
-            float best = 6f;
+            float best = 4f;
             bool found = false;
-            for (int i = 0; i < SurfaceProbeHeights.Length; i++)
+            for (int i = 0; i < ProbesDown.Length + ProbesUp.Length; i++)
             {
-                float g = World.GetGroundZ(new Vector3(p.X, p.Y, p.Z + SurfaceProbeHeights[i]), GroundType.NextBelowCurrent);
+                bool down = i < ProbesDown.Length;
+                float g = down
+                    ? World.GetGroundZ(new Vector3(p.X, p.Y, p.Z + ProbesDown[i]), GroundType.NextBelowCurrent)
+                    : World.GetGroundZ(new Vector3(p.X, p.Y, p.Z - ProbesUp[i - ProbesDown.Length]), GroundType.NextAboveCurrent);
                 if (g == 0f)
                     continue; // collision not streamed in
                 float d = Math.Abs(g - p.Z);
