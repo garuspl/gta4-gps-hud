@@ -21,8 +21,8 @@ Set a waypoint (or start a mission) and drive.
 2. Download the latest zip from [Releases](https://github.com/garuspl/gta4-gps-hud/releases) and extract
    it into your `GTAIV` folder, so `GPSHud.net.dll` and `GPSHud.ini` end up in `GTAIV\scripts`.
 
-Requires **GTA IV Complete Edition 1.2.0.59**. On other game versions the mod falls back to tracing
-roads itself.
+Requires **GTA IV Complete Edition 1.2.0.59**. Other game versions are not supported (the GPS route is
+read from that version's memory layout).
 
 ## Building from source
 
