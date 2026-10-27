@@ -1,0 +1,55 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  SHDN_URL: https://github.com/Tomasak/gta4_scripthookdotnet/releases/download/release/scripthookdotnet_v1.7.1.8.zip
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download ScriptHookDotNet
+        shell: pwsh
+        run: |
+          Invoke-WebRequest $env:SHDN_URL -OutFile shdn.zip
+          Expand-Archive shdn.zip -DestinationPath shdn-src
+          $asi = Get-ChildItem shdn-src -Recurse -Filter ScriptHookDotNet.asi | Select-Object -First 1
+          if (-not $asi) { throw "ScriptHookDotNet.asi not found in the downloaded zip." }
+          "SHDN_DIR=$($asi.DirectoryName)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build
+        shell: pwsh
+        run: ./build.ps1 -ShdnDir $env:SHDN_DIR
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { "dev-$($env:GITHUB_SHA.Substring(0, 7))" }
+          New-Item -ItemType Directory -Force dist/pkg/scripts | Out-Null
+          Copy-Item bin/GPSHud.net.dll, bin/GPSHud.ini dist/pkg/scripts
+          Copy-Item README.md dist/pkg
+          Compress-Archive dist/pkg/* "dist/GPSHud-$name.zip"
+          "PKG=dist/GPSHud-$name.zip" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GPSHud
+          path: dist/pkg/
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create $env:GITHUB_REF_NAME $env:PKG --title "GPS HUD $env:GITHUB_REF_NAME" --generate-notes
