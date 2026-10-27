@@ -42,7 +42,7 @@ jobs:
           Compress-Archive dist/pkg/* "dist/GPSHud-$name.zip"
           "PKG=dist/GPSHud-$name.zip" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: GPSHud
           path: dist/pkg/
