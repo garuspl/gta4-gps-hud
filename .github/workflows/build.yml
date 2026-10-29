@@ -86,7 +86,8 @@ jobs:
           filename: ${{ env.PKG }}
           version: ${{ env.VERSION }}
           display_name: GPS HUD ${{ github.ref_name }}
-          mod_id: 1674
+          # v3 composite mod id: (game id 253 << 32) | game-scoped mod id 1674
+          mod_id: 1086626727562
           changelog: ${{ env.RELEASE_NOTES }}
           archive_existing_version: true
           update_mod_version: true
