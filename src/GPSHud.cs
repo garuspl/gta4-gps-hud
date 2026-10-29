@@ -22,7 +22,6 @@ namespace GPSHud
     {
         public Vector3[] Pts;      // smoothed polyline, road surface height
         public float[] Cum;        // cumulative 2D length at each point
-        public float[] ArrowS;     // arrow positions along the route (closer together in curves)
         public float Length;
         public bool EndsAtDestination;
         public bool WrongWay;      // the route continues behind the car
@@ -375,7 +374,6 @@ namespace GPSHud
             r.EndsAtDestination = g.Length < GameGps.MaxPoints; // a full buffer means the route was cut short
             r.Id = ++routeIdCounter;
             r.Dest = end;
-            r.ArrowS = BuildArrowSchedule(r, objSpacing, curveTurnDegrees);
 
             // the GPS route starting behind the car means it wants you to turn around
             float s0, lat, off;
@@ -478,41 +476,27 @@ namespace GPSHud
             return Vector3.Lerp(pts[lo], pts[hi], t);
         }
 
-        // Arrow positions along the route. On a straight they are Spacing apart; through a bend the
-        // step shrinks towards ArrowMinSpacing so the chain follows the corner instead of jumping across
-        // the apex. Equal arc spacing alone leaves a sharp corner with one arrow before the apex and one
+        // Distance from one arrow to the next. On a straight it is Spacing; through a bend the step
+        // shrinks towards ArrowMinSpacing so the chain follows the corner instead of jumping across the
+        // apex. Equal arc spacing alone leaves a sharp corner with one arrow before the apex and one
         // after it - a 90-degree turn with a long hole between them, which is what looks too sparse in
         // curves. The step targets at most curveTurnDegrees of heading change per arrow, but never gets
         // closer than ArrowMinSpacing so the arrows cannot overlap.
-        static float[] BuildArrowSchedule(RouteSnapshot r, float spacing, float turnDegrees)
+        float ArrowStep(RouteSnapshot r, float s)
         {
-            List<float> list = new List<float>(64);
-            if (r.Pts == null || r.Pts.Length < 2 || r.Length <= 0.01f)
-                return list.ToArray();
-
-            float maxTurn = Clamp(turnDegrees, 0f, 90f) * Deg2Rad;
-            float minStep = Math.Min(spacing, ArrowMinSpacing(spacing));
-            for (float s = 0f; list.Count < 4096; )
-            {
-                list.Add(s);
-                float probe = Math.Min(spacing, r.Length - s);
-                if (probe < 0.5f)
-                    break;
-
-                float step = spacing;
-                if (maxTurn > 0f)
-                {
-                    // look both ways so a corner tightens the chain before and after the apex, not just
-                    // on the one step that happens to contain it
-                    float turn = Math.Max(HeadingChange(r, s, probe), HeadingChange(r, s - probe, probe));
-                    if (turn > 1e-3f)
-                        step = Math.Min(spacing, Math.Max(minStep, probe * maxTurn / turn));
-                }
-                s += step;
-                if (s > r.Length)
-                    break;
-            }
-            return list.ToArray();
+            float maxTurn = Clamp(curveTurnDegrees, 0f, 90f) * Deg2Rad;
+            if (maxTurn <= 0f)
+                return objSpacing;
+            float probe = Math.Min(objSpacing, r.Length - s);
+            if (probe < 0.5f)
+                return objSpacing;
+            // look both ways so a corner tightens the chain before and after the apex, not just on the
+            // one step that happens to contain it
+            float turn = Math.Max(HeadingChange(r, s, probe), HeadingChange(r, s - probe, probe));
+            if (turn < 1e-3f)
+                return objSpacing;
+            float minStep = Math.Min(objSpacing, ArrowMinSpacing(objSpacing));
+            return Math.Min(objSpacing, Math.Max(minStep, probe * maxTurn / turn));
         }
 
         // Angle between the route's heading at s and at s + probe (2D).
@@ -529,28 +513,6 @@ namespace GPSHud
         static float ArrowMinSpacing(float spacing)
         {
             return Math.Max(2.5f, spacing * 0.5f);
-        }
-
-        static int FirstSlotAtOrAfter(float[] arrowS, float s)
-        {
-            int lo = 0, hi = arrowS.Length;
-            while (lo < hi)
-            {
-                int mid = (lo + hi) >> 1;
-                if (arrowS[mid] < s) lo = mid + 1; else hi = mid;
-            }
-            return lo;
-        }
-
-        static int LastSlotAtOrBefore(float[] arrowS, float s)
-        {
-            int lo = 0, hi = arrowS.Length;
-            while (lo < hi)
-            {
-                int mid = (lo + hi) >> 1;
-                if (arrowS[mid] <= s) lo = mid + 1; else hi = mid;
-            }
-            return lo - 1;
         }
 
         // =================================================================================== 3D object arrows
@@ -591,11 +553,6 @@ namespace GPSHud
 
             RouteSnapshot r = st.Route;
             float s0 = st.S0;
-            if (r.ArrowS == null || r.ArrowS.Length == 0)
-            {
-                HideFrom(0);
-                return;
-            }
             float maxDist = MaxAhead(objMaxDistance, st);
             // the extra distance gets extra arrows, so MaxCount keeps the same density at speed.
             // Curves may place up to the ratio between Spacing and the closest curve spacing, so the
@@ -605,63 +562,68 @@ namespace GPSHud
             int maxCount = Math.Min(30, (int)Math.Ceiling(nominalCount * objSpacing / minArrowSpacing));
             float end = Math.Min(s0 + maxDist, r.EndsAtDestination ? r.Length - 3f : r.Length - 1f);
 
-            // Arrows sit on a fixed schedule of route distances, one arrow every Spacing metres on a
-            // straight, and closer together through a bend (see BuildArrowSchedule). Both ends of the
-            // visible stretch are found in along-route distance, so the spacing does not depend on the
-            // straight-line distance from the car - that used to drop arrows where the road ahead passes
-            // close to the car (tight bends, hairpins, roundabouts), leaving holes in the curve.
-            int firstSlot = FirstSlotAtOrAfter(r.ArrowS, s0 + objMinDistance);
-            int lastSlot = LastSlotAtOrBefore(r.ArrowS, end);
-            if (lastSlot < firstSlot)
-                lastSlot = firstSlot - 1;
-            else
-                lastSlot = Math.Min(lastSlot, firstSlot + maxCount - 1);
-
-            // An arrow keeps its slot for as long as the route still passes where that slot put it.
-            // The game re-reads the same route every RefreshIntervalMs; when it re-plans the route
-            // instead, the route at that distance moves away from the arrow and the slot is filled again.
+            // Keep every arrow that is still on the route and in view. An arrow keeps its world
+            // position; its distance is re-projected onto the current route every tick because the game
+            // can trim or re-plan the route (which moves all route distances) while the arrows
+            // themselves are still in the right place. Rebuilding them from a route-relative schedule
+            // made them fade out and come back slightly further along whenever that happened.
             for (int i = placements.Count - 1; i >= 0; i--)
             {
                 Placement p = placements[i];
-                bool keep = p.Slot >= firstSlot && p.Slot <= lastSlot
-                            && PointAt(r, p.S).DistanceTo2D(p.Center) < 1.5f;
+                float ps, plat, pdist;
+                ProjectOnRoute(r, p.Center, out ps, out plat, out pdist);
+                bool keep = pdist < 1.5f
+                            && ps >= s0 + objMinDistance
+                            && ps <= end + objSpacing;
                 if (!keep)
                 {
                     ReleasePlacement(p);
                     placements.RemoveAt(i);
-                }
-            }
-
-            // The route's own height is only a straight line between GPS points that can be hundreds of
-            // metres apart, so over a crest or dip it can be metres off the road. New arrows look for the
-            // road surface near the height of the previous arrow (or the car) instead, following the
-            // route's slope from there. Walking the slots outwards also fills any hole left by an arrow
-            // that could not be placed yet, instead of moving the whole chain and leaving a gap for good.
-            float refS = s0, refZ = CarGroundZ(st.CarPos);
-            for (int slot = firstSlot; slot <= lastSlot; slot++)
-            {
-                Placement existing = PlacementAtSlot(slot);
-                if (existing != null)
-                {
-                    refS = existing.S;
-                    refZ = existing.Road.Z;
                     continue;
                 }
+                p.S = ps;
+            }
+            placements.Sort(CompareByS);
 
-                float s = r.ArrowS[slot];
-                float expectedZ = refZ + PointAt(r, s).Z - PointAt(r, refS).Z;
+            // if the cap shrank (the car slowed down), the surplus is at the far end and already faded out
+            while (placements.Count > maxCount)
+            {
+                int last = placements.Count - 1;
+                ReleasePlacement(placements[last]);
+                placements.RemoveAt(last);
+            }
+
+            // New arrows continue exactly one step after the last one, so an arrow is placed once and
+            // then never moves. The step shrinks in curves (see ArrowStep), so the chain stays dense
+            // through bends without ever leaving a hole.
+            float refS, refZ;
+            if (placements.Count > 0)
+            {
+                Placement last = placements[placements.Count - 1];
+                refS = last.S;
+                refZ = last.Road.Z;
+            }
+            else
+            {
+                refS = s0 + objMinDistance;
+                refZ = CarGroundZ(st.CarPos);
+            }
+            float next = placements.Count > 0 ? refS + ArrowStep(r, refS) : s0 + objMinDistance + 1f;
+            while (next <= end && placements.Count < maxCount)
+            {
+                float expectedZ = refZ + PointAt(r, next).Z - PointAt(r, refS).Z;
                 bool grounded;
-                Placement p = PlaceOnRoad(r, s, expectedZ, out grounded);
+                Placement p = PlaceOnRoad(r, next, expectedZ, out grounded);
                 // no road surface found far ahead: collision there isn't streamed in yet, so try again
                 // on a later frame rather than leave an arrow floating or buried for good
                 if (p == null || (!grounded && p.Road.DistanceTo2D(st.CarPos) > 40f))
                     break;
 
-                p.Slot = slot;
-                p.S = s;
-                InsertPlacement(p);
-                refS = s;
+                p.S = next;
+                placements.Add(p);
+                refS = next;
                 refZ = p.Road.Z;
+                next += ArrowStep(r, next);
             }
 
             // give every placement an object; objects are only moved when (re)assigned
@@ -703,21 +665,10 @@ namespace GPSHud
                 DrawGlowLights();
         }
 
-        Placement PlacementAtSlot(int slot)
+        // Nearest arrow first, which the glow follows.
+        static int CompareByS(Placement a, Placement b)
         {
-            for (int i = 0; i < placements.Count; i++)
-                if (placements[i].Slot == slot)
-                    return placements[i];
-            return null;
-        }
-
-        // Keeps placements ordered by slot (nearest first), which the glow follows.
-        void InsertPlacement(Placement p)
-        {
-            int at = placements.Count;
-            while (at > 0 && placements[at - 1].Slot > p.Slot)
-                at--;
-            placements.Insert(at, p);
+            return a.S.CompareTo(b.S);
         }
 
         // Fades arrows in at the far end, out as they get close to the car, and in over a short time when
@@ -754,8 +705,7 @@ namespace GPSHud
         {
             public Vector3 Center, Road, Up, Pos;
             public float Qx, Qy, Qz, Qw;
-            public int Slot;  // index on the arrow schedule (see BuildArrowSchedule)
-            public float S;   // distance along the route
+            public float S;   // distance along the route, re-projected every tick
             public int Obj = -1;
             public int Alpha = -1;
             public int CreatedMs = Environment.TickCount;
