@@ -312,7 +312,13 @@ namespace GPSHud
             if (ped == null || !ped.isAlive || !ped.isSittingInVehicle())
                 return false;
             veh = ped.CurrentVehicle;
-            return veh != null;
+            if (veh == null)
+                return false;
+
+            // The route is a road route: boats, aircraft and trains have no road for the arrows to
+            // follow, so hide them there. Cars and bikes (including passengers in either) keep them.
+            Model model = veh.Model;
+            return model.isCar || model.isBike;
         }
 
         RouteSnapshot UpdateRoute()

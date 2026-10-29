@@ -50,12 +50,30 @@ jobs:
           name: GPSHud
           path: dist/pkg/
 
+      # The annotated tag message is the changelog: the same text goes into the GitHub release and
+      # the Nexus Mods file version, so both read identically.
+      - name: Release notes
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = gh api "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$env:GITHUB_REF_NAME" --jq ".object.sha"
+          if (-not $tag) { throw "Could not read tag $env:GITHUB_REF_NAME." }
+          $notes = (gh api "repos/$env:GITHUB_REPOSITORY/git/tags/$tag" --jq ".message") -join "`n"
+          $notes = $notes.Trim()
+          if (-not $notes) { throw "Tag $env:GITHUB_REF_NAME has no changelog message." }
+          $notes | Out-File release-notes.md -Encoding utf8
+          "RELEASE_NOTES<<GPS_HUD_EOF" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          $notes | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "GPS_HUD_EOF" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Publish release
         if: github.ref_type == 'tag'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create $env:GITHUB_REF_NAME $env:PKG --title "GPS HUD $env:GITHUB_REF_NAME" --generate-notes
+        run: gh release create $env:GITHUB_REF_NAME $env:PKG --title "GPS HUD $env:GITHUB_REF_NAME" --notes-file release-notes.md
 
       # Adds the release as a new version of the existing file on the Nexus Mods page. Needs the
       # NEXUS_API_KEY secret and the NEXUSMODS_FILE_ID variable; skipped until both are set.
@@ -68,5 +86,7 @@ jobs:
           filename: ${{ env.PKG }}
           version: ${{ env.VERSION }}
           display_name: GPS HUD ${{ github.ref_name }}
+          mod_id: 1674
+          changelog: ${{ env.RELEASE_NOTES }}
           archive_existing_version: true
           update_mod_version: true
