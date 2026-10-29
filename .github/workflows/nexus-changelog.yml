@@ -25,7 +25,7 @@ jobs:
           MOD_ID: "1086626727562"
           RELEASE: ${{ inputs.release }}
         run: |
-          gh release view "$RELEASE" --json body --jq .body > changelog.md
+          gh release view "$RELEASE" -R "$GITHUB_REPOSITORY" --json body --jq .body > changelog.md
           python3 - <<'PY'
           import json, os, sys, urllib.error, urllib.request
 
