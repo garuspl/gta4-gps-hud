@@ -7,6 +7,8 @@ highway ramp.
 - 🧭 **Follows the real GPS route.** It's read straight from the game, so it matches the minimap exactly.
 - 🛣️ **Arrows that belong in the world.** The game's own route-arrow props lie flat on the asphalt and
   tilt with the slope. Cars and buildings hide them, and they never lag behind the camera.
+- ➡️ **Tighter arrows through bends.** Arrows close up in curves, so the chain follows the corner
+  instead of jumping across it, while straights keep the normal spacing.
 - 🔦 **A soft orange glow** on the nearest arrows, so they stand out at night.
 - 🏎️ **Looks further ahead the faster you drive**, so you see the turn before you miss it.
 - ✨ **Fades in and out smoothly** as you drive along the route.
